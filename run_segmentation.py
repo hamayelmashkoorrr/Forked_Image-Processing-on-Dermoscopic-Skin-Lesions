@@ -21,7 +21,8 @@ from src.ground_truth import index_masks, load_labels, pick_ground_truth, read_m
 from src.metrics import dice_iou
 from src.segmentation import METHODS, run_methods
 
-METRICS_PATH = REPORTS_DIR / "segmentation_metrics.csv"
+# METRICS_PATH = REPORTS_DIR / "segmentation_metrics.csv"
+METRICS_PATH = REPORTS_DIR / "segmentation_metrics_v3.csv"
 
 
 def process_one(job):

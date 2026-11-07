@@ -82,7 +82,11 @@ def main():
     mask_index = index_masks(GT_DIR)
     print(f"Ground-truth folder: masks found for {len(mask_index)} distinct images")
     labels = load_labels(LABELS_FILE, LABEL_COLUMN)
-
+    print("Loaded diagnosis records:", len(labels))
+    print("Sample label IDs:", list(labels.keys())[:5])
+    print("Sample preprocessed IDs:", stems[:5])
+    print("Sample ground-truth IDs:", list(mask_index.keys())[:5])
+    
     jobs, skipped = [], {"no_label": 0, "no_ground_truth": 0}
     src_counts = {}
     for s in stems:

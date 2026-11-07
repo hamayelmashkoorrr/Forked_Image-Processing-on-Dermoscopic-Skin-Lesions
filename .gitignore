@@ -4,9 +4,13 @@ preprocessed/
 preprocessed_no_clahe/
 reports/
 segmentation/
+segmentation_v4/
 data/
-
+segs/
 # Python / Virtual Environment
 .venv/
 __pycache__/
 *.pyc
+actual_mask_diagnostics/
+fov_diagnostics/
+valid_region_diagnostics/

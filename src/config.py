@@ -220,10 +220,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = PROJECT_ROOT / "Images"
-# OUT_DIR = PROJECT_ROOT / "preprocessed"
-# OUT_NO_CLAHE_DIR = PROJECT_ROOT / "preprocessed_no_clahe"
-OUT_DIR = PROJECT_ROOT / "preprocessed_v1"
-OUT_NO_CLAHE_DIR = PROJECT_ROOT / "preprocessed_no_clahe_v1"
+OUT_DIR = PROJECT_ROOT / "preprocessed"
+OUT_NO_CLAHE_DIR = PROJECT_ROOT / "preprocessed_no_clahe"
+# OUT_DIR = PROJECT_ROOT / "preprocessed_v1"
+# OUT_NO_CLAHE_DIR = PROJECT_ROOT / "preprocessed_no_clahe_v1"
 REPORTS_DIR = PROJECT_ROOT / "reports"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
@@ -338,14 +338,32 @@ class SegmentationConfig:
     consensus_tag: str = "ST"             # "ST" or "MV"
 
     # --- Calibration stickers / coloured foreign objects (excluded like the vignette) ---
+    # Validated on all 2000 images against GT lesion masks (see detect_stickers docstring).
     sticker_detect: bool = True
-    sticker_a_max: float = -8.0           # teal / green: Lab a below this
-    sticker_b_max: float = -25.0          # blue: Lab b below this
-    sticker_b_min: float = 50.0           # yellow: Lab b above this
-    sticker_min_rel: float = 25.0         # ...and this far from the image's own median skin colour
+    # colour candidates (OpenCV Lab, a/b centred on 0)
+    sticker_a_max: float = -8.0           # green / teal / cyan: a below this (no GT lesion pixel reaches it)
+    sticker_b_max: float = -15.0          # blue / violet: b below this AND below skin b - sticker_min_rel
+    sticker_vivid_chroma: float = 45.0    # saturated red / orange / yellow: chroma above this ...
+    sticker_vivid_sat: float = 120.0      # ... and HSV saturation above this (lesions can reach it: see guard)
+    sticker_min_rel: float = 20.0         # every candidate this far from the image's median skin colour
     sticker_min_area_frac: float = 0.008
-    sticker_max_frac: float = 0.45
-    sticker_margin_frac: float = 0.045    # also drops the dark shadow ring around the sticker
+    # shape
+    sticker_min_solidity: float = 0.85
+    sticker_min_circle_inliers: float = 0.6   # share of the free outline within 4% of r from the fitted circle
+    sticker_min_radius_frac: float = 0.14     # fitted radius / min(h, w); real stickers >= 0.19, lesion blobs <= 0.08
+    sticker_min_disc_cover: float = 0.6       # the fitted disc must be filled by the component
+    # concentric rings
+    sticker_ring_skin_chroma: float = 8.0     # grey rings only searched when skin chroma >= this
+    sticker_ring_grey_frac: float = 0.45      # grey = chroma below this fraction of skin chroma
+    sticker_ring_min_frac: float = 0.6        # shell kept while this share of it is ring material
+    sticker_ring_gap: float = 0.08            # tolerated gap (fraction of r) between centre and ring
+    sticker_ring_max: float = 2.3             # rings searched out to this multiple of r
+    # vascular-lesion guard: vivid disc fully inside the field needs one of these
+    sticker_min_clipped: float = 0.03         # share of hull outline on the image / FOV edge
+    sticker_ring_min_ratio: float = 1.25      # ring radius / centre radius
+    sticker_min_unnatural: float = 0.15       # share of green / blue pixels
+    sticker_max_frac: float = 0.45            # per sticker; larger components are rejected individually
+    sticker_margin_frac: float = 0.015        # safety margin (v1 used 0.045, which spread onto skin)
 
 
 CFG = PreprocessConfig()

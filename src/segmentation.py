@@ -855,64 +855,406 @@ def to_full_res(mask, shape_hw):
     up = cv2.resize(mask.astype(np.uint8)*255, (w, h), interpolation=cv2.INTER_LINEAR)
     return up > 127
 
-def detect_stickers(bgr, valid, cfg):
-    """Colour-calibration stickers (teal / blue / green / yellow discs), coloured ink and similar foreign objects.
-    A pixel is a candidate if its ABSOLUTE chromaticity is outside what skin and lesions can have
-    (teal/green: a < sticker_a_max, blue: b < sticker_b_max, yellow: b > sticker_b_min, in OpenCV Lab units)
-    AND it also differs clearly from this image's own median skin colour (so blue-tinted images, whose
-    background is blue, are not flagged). Only large blobs survive; holes (e.g. a pen mark on the sticker) are filled."""
-    h, w = valid.shape; m = min(h, w)
-    if valid.sum() < 100: return np.zeros((h, w), bool)
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    a = cv2.GaussianBlur(lab[..., 1] - 128, (0, 0), 2)
-    b = cv2.GaussianBlur(lab[..., 2] - 128, (0, 0), 2)
-    a0, b0 = np.median(a[valid]), np.median(b[valid])
-    rel = np.hypot(a - a0, b - b0)
-    cand = valid & ((a < cfg.sticker_a_max) | (b < cfg.sticker_b_max) | (b > cfg.sticker_b_min)) & (rel > cfg.sticker_min_rel)
-    cand = cv2.morphologyEx(cand.astype(np.uint8), cv2.MORPH_CLOSE, _disk(0.015*m))
-    n, lb, st, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
-    keep = np.zeros((h, w), bool)
-    for i in range(1, n):
-        if st[i, cv2.CC_STAT_AREA] >= cfg.sticker_min_area_frac*h*w: keep |= lb == i
-    if not keep.any(): return keep
-    keep = ndi.binary_fill_holes(keep)
-    keep = cv2.dilate(keep.astype(np.uint8), _disk(cfg.sticker_margin_frac*m)) > 0
-    if keep.mean() > cfg.sticker_max_frac: return np.zeros((h, w), bool)   # implausible: do not trust
-    return keep
+# def detect_stickers(bgr, valid, cfg):
+#     """Detect edge-clipped coloured calibration stickers; return a boolean mask.
+#     Components must touch the image boundary, preventing central lesions from
+#     being classified as stickers merely because they are reddish/brown.
+#     """
+#     h, w = valid.shape
+#     m = min(h, w)
+#     if valid.sum() < 100:
+#         return np.zeros((h, w), dtype=bool)
 
-def detect_vignette(bgr, cfg):
-    gray = cv2.GaussianBlur(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), (0, 0), 2).astype(np.float32)
+#     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+#     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+#     hue, sat, val = cv2.split(hsv)
+
+#     # OpenCV hue is in [0,179]. Cover the common calibration-disc colours.
+#     colour_hue = (
+#         (hue <= 10) | (hue >= 170) |                 # red
+#         ((hue >= 7) & (hue <= 25)) |                 # orange
+#         ((hue >= 20) & (hue <= 39)) |                # yellow
+#         ((hue >= 35) & (hue <= 88)) |                # green
+#         ((hue >= 78) & (hue <= 105)) |               # cyan
+#         ((hue >= 95) & (hue <= 137)) |               # blue
+#         ((hue >= 125) & (hue <= 165))                # purple
+#     )
+
+#     # Image-adaptive Lab contrast helps account for camera colour balance.
+#     aa = cv2.GaussianBlur(lab[..., 1] - 128.0, (0, 0), 2)
+#     bb = cv2.GaussianBlur(lab[..., 2] - 128.0, (0, 0), 2)
+#     a0, b0 = float(np.median(aa[valid])), float(np.median(bb[valid]))
+#     lab_distance = np.hypot(aa - a0, bb - b0)
+
+#     candidate = valid & colour_hue & (sat >= 48) & (val >= 35) & (lab_distance >= 15.0)
+#     candidate |= valid & colour_hue & (sat >= 90) & (lab_distance >= 10.0)
+#     candidate = candidate.astype(np.uint8)
+
+#     # Close gaps in textured/reflective sticker surfaces.
+#     close_r = max(2, int(round(0.010 * m)))
+#     candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, _disk(close_r))
+#     candidate = cv2.morphologyEx(candidate, cv2.MORPH_OPEN, _disk(max(1, int(round(0.002 * m)))))
+
+#     n, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, connectivity=8)
+#     keep = np.zeros((h, w), dtype=bool)
+#     min_area = max(100, int(0.006 * h * w))
+#     max_area = int(0.70 * h * w)
+
+#     # These calibration discs are placed at the image perimeter and are
+#     # visibly clipped by the frame. Requiring boundary contact is the key
+#     # safeguard against removing a central lesion with similar colour.
+#     edge_band = max(3, int(round(0.025 * m)))
+#     edge_zone = np.zeros((h, w), dtype=bool)
+#     edge_zone[:edge_band, :] = True
+#     edge_zone[-edge_band:, :] = True
+#     edge_zone[:, :edge_band] = True
+#     edge_zone[:, -edge_band:] = True
+
+#     for i in range(1, n):
+#         area = int(stats[i, cv2.CC_STAT_AREA])
+#         if area < min_area or area > max_area:
+#             continue
+#         component = labels == i
+#         if np.any(component & edge_zone):
+#             keep |= component
+
+#     if not keep.any():
+#         return keep
+
+#     # Fill pale/reflective holes inside sticker surfaces.
+#     keep = ndi.binary_fill_holes(keep)
+#     margin = max(2, int(round(min(float(getattr(cfg, "sticker_margin_frac", 0.012)), 0.015) * m)))
+#     keep = cv2.dilate(keep.astype(np.uint8), _disk(margin)) > 0
+
+#     # Do not allow a dilation step to create a disconnected central region.
+#     n2, labels2, stats2, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8), connectivity=8)
+#     edge_keep = np.zeros((h, w), dtype=bool)
+#     for i in range(1, n2):
+#         component = labels2 == i
+#         if np.any(component & edge_zone):
+#             edge_keep |= component
+#     return edge_keep
+
+def _fit_circle(pts, tol=0.04, iters=4):
+    """Trimmed least-squares circle through outline points (x, y).
+    Refits on the points that lie on the circle, so a glare patch or notch in part of the outline
+    does not spoil the fit. Returns (cx, cy, r, inlier fraction within tol*r of the circle)."""
+    x = pts[:, 0].astype(np.float64); y = pts[:, 1].astype(np.float64)
+    use = np.ones(len(x), bool)
+    for _ in range(iters):
+        A = np.c_[2*x[use], 2*y[use], np.ones(use.sum())]
+        (cx, cy, c), *_ = np.linalg.lstsq(A, x[use]**2 + y[use]**2, rcond=None)
+        r = float(np.sqrt(max(c + cx*cx + cy*cy, 1e-9)))
+        res = np.abs(np.hypot(x - cx, y - cy) - r)
+        new = res <= max(tol*r, 2*np.median(res[use]), 1.5)
+        if new.sum() < 10:
+            break
+        use = new
+    return float(cx), float(cy), r, float((res <= max(tol*r, 1.5)).mean())
+
+
+def detect_stickers(bgr, valid, cfg, debug=None):
+    """Mask of coloured calibration stickers (True = sticker), including their concentric rings.
+
+    1. Colour candidates: colours no skin or lesion takes (green/teal/cyan, blue/violet, or very
+       saturated red/orange/yellow), and far from this image's own median skin colour.
+    2. Shape: each candidate must be solid, and its outline (ignoring the side clipped by the image /
+       field-of-view edge and straight bridges over glare) must fit a circle.
+    3. Rings: from the fitted circle, follow concentric shells outward while they are sticker colour or
+       neutral grey. Grey only counts when the skin itself is clearly coloured, so grey != skin.
+    4. Vascular-lesion guard: a vivid red/orange/yellow disc fully inside the field is kept only if it
+       has a ring or contains green/blue. Every component is judged on its own, so one oversized
+       candidate never discards the other stickers.
+    `debug`, if a dict, receives per-component measurements and the reason for each decision.
+    FOV detection is not changed by this function."""
+    h, w = valid.shape
+    m = min(h, w)
+    if valid.sum() < 100:
+        return np.zeros((h, w), bool)
+
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    sg = max(1.0, 0.004*m)
+    a = cv2.GaussianBlur(lab[..., 1] - 128.0, (0, 0), sg)
+    b = cv2.GaussianBlur(lab[..., 2] - 128.0, (0, 0), sg)
+    sat = cv2.GaussianBlur(hsv[..., 1].astype(np.float32), (0, 0), sg)
+    C = np.hypot(a, b)
+
+    # ---- 1. colour candidates ----
+    a0, b0 = float(np.median(a[valid])), float(np.median(b[valid]))
+    rel = np.hypot(a - a0, b - b0)
+    green = a < cfg.sticker_a_max                                            # green / teal / cyan
+    blue = b < min(cfg.sticker_b_max, b0 - cfg.sticker_min_rel)              # blue / violet
+    vivid = (C > cfg.sticker_vivid_chroma) & (sat > cfg.sticker_vivid_sat)   # saturated red / orange / yellow
+    cand = valid & (rel > cfg.sticker_min_rel) & (green | blue | vivid)
+    cand = cv2.morphologyEx(cand.astype(np.uint8), cv2.MORPH_CLOSE, _disk(0.008*m))
+    cand = ndi.binary_fill_holes(cv2.morphologyEx(cand, cv2.MORPH_OPEN, _disk(0.004*m)) > 0)
+
+    # ring material: candidate colours, or neutral grey where the skin itself is clearly coloured
+    skin_px = valid & ~cand
+    c_skin = float(np.median(C[skin_px])) if skin_px.sum() > 100 else 0.0
+    ring_ok = c_skin >= cfg.sticker_ring_skin_chroma
+    ringlike = cand | ((C < cfg.sticker_ring_grey_frac*c_skin) & valid if ring_ok else False)
+
+    # image border / field-of-view edge: a clipped sticker's outline lies there
+    edge = ~cv2.erode(np.pad(valid, 1).astype(np.uint8), _disk(max(2, 0.015*m)))[1:-1, 1:-1].astype(bool)
+
+    n, lbl, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    yy, xx = np.ogrid[:h, :w]
+    out = np.zeros((h, w), bool)
+    info = []
+    for i in range(1, n):
+        area = int(st[i, cv2.CC_STAT_AREA])
+        rec = {"area": area/(h*w)}
+        info.append(rec)
+        if area < cfg.sticker_min_area_frac*h*w:
+            rec["why"] = "small"; continue
+        comp = lbl == i
+        cnt = max(cv2.findContours(comp.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0],
+                  key=cv2.contourArea)
+        hull = cv2.convexHull(cnt)
+        solidity = area / max(cv2.contourArea(hull), 1.0)
+        # ---- 2. shape: circle fitted to the convex-hull outline ----
+        hull_img = np.zeros((h, w), np.uint8)
+        cv2.fillConvexPoly(hull_img, hull, 1)
+        pts = max(cv2.findContours(hull_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0],
+                  key=cv2.contourArea)[:, 0, :]
+        # keep hull points on the component's real outline (drops chords bridging notches / glare)
+        # and away from the frame edge (drops the clipped side)
+        near_comp = cv2.distanceTransform((~comp).astype(np.uint8), cv2.DIST_L2, 3) <= max(2.0, 0.01*m)
+        on_edge = edge[pts[:, 1], pts[:, 0]]
+        free = pts[~on_edge & near_comp[pts[:, 1], pts[:, 0]]]
+        clipped = float(on_edge.mean())
+        rec.update(solidity=round(solidity, 3), clipped=round(clipped, 2))
+        if solidity < cfg.sticker_min_solidity:
+            rec["why"] = "solidity"; continue
+        if len(free) < 20 or len(free) < 0.2*len(pts):
+            rec["why"] = "no free outline"; continue
+        cx, cy, r, inl = _fit_circle(free)
+        rec.update(r=round(r/m, 3), inliers=round(inl, 2))
+        if inl < cfg.sticker_min_circle_inliers:
+            rec["why"] = "not circular"; continue
+        if r < cfg.sticker_min_radius_frac*m:
+            rec["why"] = "radius small"; continue
+        disc = ((xx - cx)**2 + (yy - cy)**2 <= r*r) & valid
+        cover = float((disc & comp).sum() / max(disc.sum(), 1))
+        rec["cover"] = round(cover, 2)
+        if cover < cfg.sticker_min_disc_cover:          # an arc / crescent of colour, not a disc
+            rec["why"] = "disc not filled"; continue
+
+        # ---- 3. rings: walk outward shell by shell (short gaps allowed: soft centre/ring edge) ----
+        d = np.sqrt((xx - cx)**2 + (yy - cy)**2)
+        R, t, dr = r, r, max(1.0, 0.02*r)
+        while t < cfg.sticker_ring_max*r:
+            shell = (d > t) & (d <= t + dr) & valid
+            if shell.sum() >= 10 and ringlike[shell].mean() >= cfg.sticker_ring_min_frac:
+                R = t + dr
+            elif t - R > cfg.sticker_ring_gap*r:
+                break
+            t += dr
+        rec["ring"] = round(R/r, 2)
+
+        # ---- 4. vascular-lesion guard ----
+        unnatural = float((green | blue)[comp].mean())
+        rec["green_blue"] = round(unnatural, 2)
+        if (clipped < cfg.sticker_min_clipped and R/r < cfg.sticker_ring_min_ratio
+                and unnatural < cfg.sticker_min_unnatural):
+            rec["why"] = "vivid, inside field, no ring"; continue
+        region = ((d <= R) & valid) | comp
+        if region.mean() > cfg.sticker_max_frac:
+            rec["why"] = "too big"; continue
+        rec["why"] = "accept"
+        out |= region
+
+    if out.any():
+        out = (cv2.dilate(out.astype(np.uint8), _disk(cfg.sticker_margin_frac*m)) > 0) & valid
+    if debug is not None:
+        debug.update(a0=a0, b0=b0, c_skin=c_skin, ring_ok=ring_ok, comps=info)
+    return out
+
+
+# def detect_vignette(bgr, cfg):
+#     gray = cv2.GaussianBlur(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), (0, 0), 2).astype(np.float32)
+#     h, w = gray.shape
+#     ref = float(np.percentile(gray, 75))
+#     valid = np.ones((h, w), bool)
+#     bright = (gray >= cfg.fov_rel_thr*ref).astype(np.uint8)
+#     n, lab, st, _ = cv2.connectedComponentsWithStats(bright, connectivity=8)
+#     if n > 1:
+#         big = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+#         cnts, _ = cv2.findContours((lab == big).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#         m = np.zeros((h, w), np.uint8)
+#         cv2.fillConvexPoly(m, cv2.convexHull(max(cnts, key=cv2.contourArea)), 1)
+#         hull = m > 0
+#         excl = ~hull
+#         if cfg.fov_min_frac < hull.mean() < 0.985 and excl.any():
+#             cy, cx = max(2, int(0.03*h)), max(2, int(0.03*w))
+#             corners = [hull[cy, cx], hull[cy, w-1-cx], hull[h-1-cy, cx], hull[h-1-cy, w-1-cx]]
+#             if sum(not c for c in corners) >= 2 and gray[excl].mean() < 0.6*ref:
+#                 valid = hull
+#     dark = (gray < cfg.vignette_dark_thresh).astype(np.uint8)
+#     n2, l2, s2, _ = cv2.connectedComponentsWithStats(dark, connectivity=4)
+#     for k in range(1, n2):
+#         x, y, bw, bh, area = s2[k]
+#         if (x == 0 or y == 0 or x + bw == w or y + bh == h) and area >= cfg.vignette_min_area_frac*h*w:
+#             valid &= ~(cv2.dilate((l2 == k).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0)
+#     if cfg.sticker_detect:
+#         valid &= ~detect_stickers(bgr, valid, cfg)
+#     vig_frac = 1.0 - float(valid.mean())
+#     if vig_frac > cfg.vignette_max_frac:
+#         valid[:] = True; vig_frac = 0.0
+#     if not valid.all():
+#         valid = cv2.erode(valid.astype(np.uint8), _disk(max(2, round(cfg.vignette_margin_frac*min(h, w))))) > 0
+#     return valid, vig_frac
+
+
+
+def detect_vignette(bgr, cfg, return_masks=False):
+   
+    gray = cv2.GaussianBlur(
+        cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY),
+        (0, 0),
+        2
+    ).astype(np.float32)
+
     h, w = gray.shape
     ref = float(np.percentile(gray, 75))
-    valid = np.ones((h, w), bool)
-    bright = (gray >= cfg.fov_rel_thr*ref).astype(np.uint8)
-    n, lab, st, _ = cv2.connectedComponentsWithStats(bright, connectivity=8)
+
+    valid = np.ones((h, w), dtype=bool)
+
+    bright = (
+        gray >= cfg.fov_rel_thr * ref
+    ).astype(np.uint8)
+
+    n, lab, st, _ = cv2.connectedComponentsWithStats(
+        bright,
+        connectivity=8
+    )
+
     if n > 1:
-        big = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
-        cnts, _ = cv2.findContours((lab == big).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        m = np.zeros((h, w), np.uint8)
-        cv2.fillConvexPoly(m, cv2.convexHull(max(cnts, key=cv2.contourArea)), 1)
-        hull = m > 0
-        excl = ~hull
-        if cfg.fov_min_frac < hull.mean() < 0.985 and excl.any():
-            cy, cx = max(2, int(0.03*h)), max(2, int(0.03*w))
-            corners = [hull[cy, cx], hull[cy, w-1-cx], hull[h-1-cy, cx], hull[h-1-cy, w-1-cx]]
-            if sum(not c for c in corners) >= 2 and gray[excl].mean() < 0.6*ref:
-                valid = hull
-    dark = (gray < cfg.vignette_dark_thresh).astype(np.uint8)
-    n2, l2, s2, _ = cv2.connectedComponentsWithStats(dark, connectivity=4)
+
+        big = 1 + int(
+            np.argmax(st[1:, cv2.CC_STAT_AREA])
+        )
+
+        cnts, _ = cv2.findContours(
+            (lab == big).astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if cnts:
+
+            hull_mask = np.zeros((h, w), np.uint8)
+
+            cv2.fillConvexPoly(
+                hull_mask,
+                cv2.convexHull(
+                    max(cnts, key=cv2.contourArea)
+                ),
+                1
+            )
+
+            hull = hull_mask > 0
+            excluded = ~hull
+
+            if cfg.fov_min_frac < hull.mean() < 0.985:
+
+                cy = max(2, int(0.03 * h))
+                cx = max(2, int(0.03 * w))
+
+                corners = [
+                    hull[cy, cx],
+                    hull[cy, w - 1 - cx],
+                    hull[h - 1 - cy, cx],
+                    hull[h - 1 - cy, w - 1 - cx]
+                ]
+
+                if (
+                    sum(not c for c in corners) >= 2
+                    and gray[excluded].mean() < 0.6 * ref
+                ):
+                    valid = hull
+
+    # ---------------------------------------------------------
+    # 2. REMOVE BLACK VIGNETTE CONNECTED TO IMAGE BORDER
+    # ---------------------------------------------------------
+
+    dark = (
+        gray < cfg.vignette_dark_thresh
+    ).astype(np.uint8)
+
+    n2, labels2, stats2, _ = cv2.connectedComponentsWithStats(
+        dark,
+        connectivity=4
+    )
     for k in range(1, n2):
-        x, y, bw, bh, area = s2[k]
-        if (x == 0 or y == 0 or x + bw == w or y + bh == h) and area >= cfg.vignette_min_area_frac*h*w:
-            valid &= ~(cv2.dilate((l2 == k).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0)
+        x, y, bw, bh, area = stats2[k]
+
+        touches_border = (
+            x == 0 or
+            y == 0 or
+            x + bw == w or
+            y + bh == h
+        )
+
+        if (
+            touches_border
+            and area >= cfg.vignette_min_area_frac * h * w
+        ):
+
+            component = labels2 == k
+
+            component = cv2.dilate(
+                component.astype(np.uint8),
+                np.ones((7, 7), np.uint8)
+            ) > 0
+
+            valid &= ~component
+
+    fov_mask = valid.copy()
+    artifact_mask = np.zeros(
+        (h, w),
+        dtype=bool
+    )
     if cfg.sticker_detect:
-        valid &= ~detect_stickers(bgr, valid, cfg)
-    vig_frac = 1.0 - float(valid.mean())
-    if vig_frac > cfg.vignette_max_frac:
-        valid[:] = True; vig_frac = 0.0
+        artifact_mask = detect_stickers(
+            bgr,
+            valid,
+            cfg
+        )
+        valid &= ~artifact_mask
+    vignette_frac = 1.0 - float(valid.mean())
+    if vignette_frac > cfg.vignette_max_frac:
+        # Fall back from an unreliable vignette estimate, but never restore
+        # pixels already identified as calibration stickers.
+        valid = np.ones((h, w), dtype=bool) & ~artifact_mask
+        vignette_frac = float(artifact_mask.mean())
+
+    # Erode the final valid region to remove uncertain
+    # boundaries around the dermoscope and artifacts.
     if not valid.all():
-        valid = cv2.erode(valid.astype(np.uint8), _disk(max(2, round(cfg.vignette_margin_frac*min(h, w))))) > 0
-    return valid, vig_frac
+
+        margin = max(
+            2,
+            round(
+                cfg.vignette_margin_frac * min(h, w)
+            )
+        )
+        valid = cv2.erode(
+            valid.astype(np.uint8),
+            _disk(margin)
+        ) > 0
+    if return_masks:
+        return (
+            valid,
+            vignette_frac,
+            fov_mask,
+            artifact_mask
+        )
+    return valid, vignette_frac
+
+
 
 def clean_mask(mask, valid, cfg):
     m = (mask & valid).astype(np.uint8)

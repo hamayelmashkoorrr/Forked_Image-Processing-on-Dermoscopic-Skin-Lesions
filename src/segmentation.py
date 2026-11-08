@@ -2053,6 +2053,8 @@ def clean_mask(mask, valid, cfg, sal=None):
     out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kc, kc)))
     return ndi.binary_fill_holes((out > 0) & valid)
 
+
+
 def _skin_band(valid, cfg):
     m = min(valid.shape)
     pad = cv2.copyMakeBorder(valid.astype(np.uint8), 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
@@ -2238,6 +2240,65 @@ def segment_active_contour(ctx, cfg):
     if region.any() and outside.any() and f[region].mean() < f[outside].mean(): region = outside
     return region
 
+# def regularize_shape(mask, valid, solidity_thr=0.8):
+#     m = mask.astype(np.uint8)
+#     cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#     if not cnts:
+#         return mask
+#     hull = np.zeros_like(m)
+#     cv2.fillPoly(hull, [cv2.convexHull(np.vstack(cnts))], 1)
+#     hull = hull.astype(bool)
+#     if mask.sum() / max(hull.sum(), 1) < solidity_thr:
+#         return hull & valid
+#     return mask
+
+# def run_methods(clahe_bgr, noclahe_bgr, cfg):
+#     seg_bgr = clahe_bgr if cfg.use_clahe else noclahe_bgr
+#     H, W = seg_bgr.shape[:2]
+#     img = np.ascontiguousarray(_shrink(seg_bgr, cfg.work_max_side))
+#     ref = _shrink(noclahe_bgr, cfg.work_max_side)
+#     ctx = prepare(img, ref, cfg); valid = ctx["valid"]
+#     fns = {"otsu": segment_otsu, "grabcut": segment_grabcut, "active_contour": segment_active_contour}
+#     cleaned, out = {}, {}
+#     for name, fn in fns.items():
+#             try:
+#                 cleaned[name] = clean_mask(fn(ctx, cfg), valid, cfg, sal=ctx["sal"])
+#                 # inside the for-loop over methods, right after cleaned[name] = clean_mask(...)
+#                 if not ctx.get("fallback"):
+#                     cleaned[name] = regularize_shape(cleaned[name], valid)
+#                 status = "ok" if cleaned[name].any() else "empty"
+#                 out[name] = (to_full_res(cleaned[name], (H, W)), status)
+#             except Exception as e:
+#                 cleaned[name] = np.zeros(valid.shape, bool)
+#                 out[name] = (np.zeros((H, W), bool), f"error: {e}")
+                
+#     # v5: weighted vote using ensemble_weights
+#     votes = sum(int(w) * cleaned[n].astype(np.uint8) for w, n in zip(cfg.ensemble_weights, fns))
+#     ens = clean_mask(votes >= cfg.ensemble_min_votes, valid, cfg, sal=ctx["sal"])
+#     if not ctx.get("fallback"):
+#         ens = regularize_shape(ens, valid)
+#     out["ensemble"] = (to_full_res(ens, (H, W)), "ok" if ens.any() else "empty")
+#     return out, float(ctx.get("vig_frac", 0.0))
+
+
+
+
+def regularize_shape(mask, valid, solidity_thr=0.8, max_growth=1.4):
+    if not mask.any():
+        return mask
+    m = mask.astype(np.uint8)
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return mask
+    hull = np.zeros_like(m)
+    cv2.fillPoly(hull, [cv2.convexHull(np.vstack(cnts))], 1)
+    hull = hull.astype(bool) & valid
+    area = mask.sum()
+    if area / max(hull.sum(), 1) < solidity_thr and hull.sum() <= max_growth * area:
+        return hull
+    return mask
+
+
 def run_methods(clahe_bgr, noclahe_bgr, cfg):
     seg_bgr = clahe_bgr if cfg.use_clahe else noclahe_bgr
     H, W = seg_bgr.shape[:2]
@@ -2246,17 +2307,22 @@ def run_methods(clahe_bgr, noclahe_bgr, cfg):
     ctx = prepare(img, ref, cfg); valid = ctx["valid"]
     fns = {"otsu": segment_otsu, "grabcut": segment_grabcut, "active_contour": segment_active_contour}
     cleaned, out = {}, {}
+    use_hull = not ctx.get("fallback")
     for name, fn in fns.items():
-            try:
-                cleaned[name] = clean_mask(fn(ctx, cfg), valid, cfg, sal=ctx["sal"])
-                status = "ok" if cleaned[name].any() else "empty"
-                out[name] = (to_full_res(cleaned[name], (H, W)), status)
-            except Exception as e:
-                cleaned[name] = np.zeros(valid.shape, bool)
-                out[name] = (np.zeros((H, W), bool), f"error: {e}")
-                
-    # v5: weighted vote using ensemble_weights
+        try:
+            m = clean_mask(fn(ctx, cfg), valid, cfg, sal=ctx["sal"])
+            if use_hull:
+                m = regularize_shape(m, valid)
+            cleaned[name] = m
+            status = "ok" if m.any() else "empty"
+            out[name] = (to_full_res(m, (H, W)), status)
+        except Exception as e:
+            cleaned[name] = np.zeros(valid.shape, bool)
+            out[name] = (np.zeros((H, W), bool), f"error: {e}")
+
     votes = sum(int(w) * cleaned[n].astype(np.uint8) for w, n in zip(cfg.ensemble_weights, fns))
     ens = clean_mask(votes >= cfg.ensemble_min_votes, valid, cfg, sal=ctx["sal"])
+    if use_hull:
+        ens = regularize_shape(ens, valid)
     out["ensemble"] = (to_full_res(ens, (H, W)), "ok" if ens.any() else "empty")
     return out, float(ctx.get("vig_frac", 0.0))

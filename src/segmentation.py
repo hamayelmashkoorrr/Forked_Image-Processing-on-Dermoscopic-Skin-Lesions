@@ -2103,26 +2103,38 @@ def _saliency(lab, valid, model, cfg):
     return np.clip(d/hi, 0, 1).astype(np.float32), hi
 
 def _seed_from_sal(sal, valid, hi, cfg):
-    u8 = np.round(sal*255).astype(np.uint8)
+    # Otsu runs on a COMPRESSED saliency scale (sal ** sal_gamma, 1.0 = old behaviour). The raw Mahalanobis
+    # distance is dominated by the dark lesion core, so Otsu used to split "core" from "everything else" and
+    # missed the faint halo that the (generous) ground-truth outlines include. Compressing the scale gives the
+    # halo more weight. The returned threshold is converted back to the raw saliency scale, so GrabCut,
+    # hysteresis growth etc. keep working unchanged.
+    g = float(cfg.sal_gamma)
+    u8 = np.round(np.power(sal, g) * 255).astype(np.uint8)
     t_otsu, _ = cv2.threshold(u8[valid].reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    floor = 255.0*cfg.sal_floor/hi
+    floor = 255.0 * (cfg.sal_floor / hi) ** g
     nvalid = max(int(valid.sum()), 1)
+    
     def make(f, fl):
-        t = max(t_otsu*f, fl)
+        t = max(t_otsu * f, fl)
         return clean_mask((u8 > t) & valid, valid, cfg, sal=sal), t
+
     seed, t = make(cfg.otsu_relax, floor)
-    frac = seed.sum()/nvalid
+    frac = seed.sum() / nvalid
+    
     if frac > cfg.max_seed_frac:
         for f in (1.0, 1.3, 1.6):
             s2, t2 = make(f, floor)
-            if s2.any() and s2.sum()/nvalid <= cfg.max_seed_frac:
-                seed, t = s2, t2; break
+            if s2.any() and s2.sum() / nvalid <= cfg.max_seed_frac:
+                seed, t = s2, t2
+                break
     elif frac < cfg.min_seed_frac:
-        for f, fl in ((0.5, floor), (0.35, 0.6*floor)):
+        for f, fl in ((0.5, floor), (0.35, 0.6 * floor)):
             s2, t2 = make(f, fl)
-            if s2.sum()/nvalid >= cfg.min_seed_frac:
-                seed, t = s2, t2; break
-    return seed, float(t)/255.0
+            if s2.sum() / nvalid >= cfg.min_seed_frac:
+                seed, t = s2, t2
+                break
+                
+    return seed, (float(t) / 255.0) ** (1.0 / g)      # back to the raw saliency scale
 
 def _looks_like_skin(lab, seed, valid):
     rest = valid & ~seed
@@ -2235,13 +2247,16 @@ def run_methods(clahe_bgr, noclahe_bgr, cfg):
     fns = {"otsu": segment_otsu, "grabcut": segment_grabcut, "active_contour": segment_active_contour}
     cleaned, out = {}, {}
     for name, fn in fns.items():
-        try:
-            cleaned[name] = clean_mask(fn(ctx, cfg), valid, cfg, sal=ctx["sal"])
-            status = "ok" if cleaned[name].any() else "empty"
-            out[name] = (to_full_res(cleaned[name], (H, W)), status)
-        except Exception as e:
-            cleaned[name] = np.zeros(valid.shape, bool); out[name] = (np.zeros((H, W), bool), f"error: {e}")
-    votes = sum(cleaned[n].astype(np.uint8) for n in fns)
+            try:
+                cleaned[name] = clean_mask(fn(ctx, cfg), valid, cfg, sal=ctx["sal"])
+                status = "ok" if cleaned[name].any() else "empty"
+                out[name] = (to_full_res(cleaned[name], (H, W)), status)
+            except Exception as e:
+                cleaned[name] = np.zeros(valid.shape, bool)
+                out[name] = (np.zeros((H, W), bool), f"error: {e}")
+                
+    # v5: weighted vote using ensemble_weights
+    votes = sum(int(w) * cleaned[n].astype(np.uint8) for w, n in zip(cfg.ensemble_weights, fns))
     ens = clean_mask(votes >= cfg.ensemble_min_votes, valid, cfg, sal=ctx["sal"])
     out["ensemble"] = (to_full_res(ens, (H, W)), "ok" if ens.any() else "empty")
     return out, float(ctx.get("vig_frac", 0.0))
